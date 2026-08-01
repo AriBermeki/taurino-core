@@ -1,6 +1,10 @@
-// Copyright 2019-2024 Tauri Programme within The Commons Conservancy
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-License-Identifier: MIT
+// Portions of this file are derived from Tauri:
+// https://github.com/tauri-apps/tauri
+//
+// Copyright 2019-2025 The Tauri Programme
+// within The Commons Conservancy
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // creates a cfg alias if `has_feature` is true.
 // `alias` must be a snake case string.

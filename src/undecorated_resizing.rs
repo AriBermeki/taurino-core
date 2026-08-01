@@ -15,6 +15,11 @@
     target_os = "openbsd"
 ))]
 
+//! Cross-platform resize handling for undecorated windows.
+//!
+//! Windows uses a transparent child window and native hit testing. Linux and
+//! BSD targets use GTK pointer, button, and touch events.
+
 const CLIENT: isize = 0b0000;
 const LEFT: isize = 0b0001;
 const RIGHT: isize = 0b0010;
@@ -49,6 +54,7 @@ enum HitTestResult {
     NoWhere,
 }
 
+/// Resolves a point to the corresponding resize edge or corner.
 #[allow(clippy::too_many_arguments)]
 fn hit_test(
     left: WindowPositions,
@@ -82,7 +88,7 @@ fn hit_test(
 
 #[cfg(windows)]
 mod windows {
-    use crate::util;
+    use crate::utils;
 
     use super::{HitTestResult, hit_test};
 
@@ -118,10 +124,13 @@ mod windows {
         has_undecorated_shadows: bool,
     }
 
+    /// Attaches native resize handling to an undecorated window.
     pub fn attach_resize_handler(hwnd: isize, has_undecorated_shadows: bool) {
         let parent = HWND(hwnd as _);
 
-        // return early if we already attached
+        // Avoid installing the handler more than once.
+        // SAFETY: `parent` is supplied by the caller as a native window handle.
+        // The class and window names are valid static, null-terminated strings.
         if unsafe { FindWindowExW(Some(parent), None, CLASS_NAME, WINDOW_NAME) }.is_ok() {
             return;
         }
@@ -132,6 +141,7 @@ mod windows {
             lpfnWndProc: Some(drag_resize_window_proc),
             cbClsExtra: 0,
             cbWndExtra: 0,
+            // SAFETY: Passing a null module name requests the current process module.
             hInstance: unsafe { HINSTANCE(GetModuleHandleW(PCWSTR::null()).unwrap_or_default().0) },
             hIcon: HICON::default(),
             hCursor: HCURSOR::default(),
@@ -141,9 +151,13 @@ mod windows {
             hIconSm: HICON::default(),
         };
 
+        // SAFETY: `class` remains valid for the duration of the call and its
+        // window procedure uses the required Win32 ABI.
         unsafe { RegisterClassExW(&class) };
 
         let mut rect = RECT::default();
+        // SAFETY: `rect` is valid writable storage and `parent` is expected to
+        // reference a live window. Failure preserves the original behavior.
         unsafe { GetClientRect(parent, &mut rect).unwrap() };
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
@@ -153,6 +167,9 @@ mod windows {
             has_undecorated_shadows,
         };
 
+        // SAFETY: The registered class, parent handle, dimensions, and creation
+        // data remain valid for the duration of `CreateWindowExW`. Ownership of
+        // the boxed data is transferred to the child window procedure.
         let Ok(drag_window) = (unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
@@ -172,6 +189,8 @@ mod windows {
             return;
         };
 
+        // SAFETY: `drag_window` was created successfully above. The parent
+        // subclass owns its boxed state until `WM_NCDESTROY`.
         unsafe {
             set_drag_hwnd_rgn(drag_window, width, height, has_undecorated_shadows);
 
@@ -199,6 +218,13 @@ mod windows {
         }
     }
 
+    /// Handles messages for the subclassed parent window.
+    ///
+    /// # Safety
+    ///
+    /// Win32 must invoke this callback with a valid parent handle and with
+    /// `data` pointing to the `UndecoratedResizingData` allocated when the
+    /// subclass was installed.
     unsafe extern "system" fn subclass_parent(
         parent: HWND,
         msg: u32,
@@ -210,60 +236,74 @@ mod windows {
         match msg {
             WM_SIZE => {
                 let data = data as *mut UndecoratedResizingData;
-                let data = &*data;
+                let data = unsafe { &*data };
                 let child = data.child;
                 let has_undecorated_shadows = data.has_undecorated_shadows;
 
-                // when parent is maximized, remove the undecorated window drag resize region
+                // Remove the resize inset while the parent is maximized.
                 if is_maximized(parent).unwrap_or(false) {
-                    let _ = SetWindowPos(
-                        child,
-                        Some(HWND_TOP),
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOMOVE,
-                    );
-                } else {
-                    // otherwise update the cutout region
-                    let mut rect = RECT::default();
-                    if GetClientRect(parent, &mut rect).is_ok() {
-                        let width = rect.right - rect.left;
-                        let height = rect.bottom - rect.top;
-
-                        let _ = SetWindowPos(
+                    let _ = unsafe {
+                        SetWindowPos(
                             child,
                             Some(HWND_TOP),
                             0,
                             0,
-                            width,
-                            height,
+                            0,
+                            0,
                             SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOMOVE,
-                        );
+                        )
+                    };
+                } else {
+                    // Resize and rebuild the inset for the restored window.
+                    let mut rect = RECT::default();
+                    if unsafe { GetClientRect(parent, &mut rect).is_ok() } {
+                        let width = rect.right - rect.left;
+                        let height = rect.bottom - rect.top;
 
-                        set_drag_hwnd_rgn(child, width, height, has_undecorated_shadows);
+                        let _ = unsafe {
+                            SetWindowPos(
+                                child,
+                                Some(HWND_TOP),
+                                0,
+                                0,
+                                width,
+                                height,
+                                SWP_ASYNCWINDOWPOS
+                                    | SWP_NOACTIVATE
+                                    | SWP_NOOWNERZORDER
+                                    | SWP_NOMOVE,
+                            )
+                        };
+
+                        unsafe { set_drag_hwnd_rgn(child, width, height, has_undecorated_shadows) };
                     }
                 }
             }
 
             WM_UPDATE_UNDECORATED_SHADOWS => {
                 let data = data as *mut UndecoratedResizingData;
-                let data = &mut *data;
+                let data = unsafe { &mut *data };
                 data.has_undecorated_shadows = wparam.0 != 0;
             }
 
             WM_NCDESTROY => {
                 let data = data as *mut UndecoratedResizingData;
-                drop(Box::from_raw(data));
+                drop(unsafe { Box::from_raw(data) });
             }
 
             _ => {}
         }
 
-        DefSubclassProc(parent, msg, wparam, lparam)
+        unsafe { DefSubclassProc(parent, msg, wparam, lparam) }
     }
 
+    /// Handles messages for the transparent resize child window.
+    ///
+    /// # Safety
+    ///
+    /// Win32 must provide valid callback arguments. After `WM_CREATE`,
+    /// `GWLP_USERDATA` must contain the boxed `UndecoratedResizingData` passed
+    /// through `CreateWindowExW`.
     unsafe extern "system" fn drag_resize_window_proc(
         child: HWND,
         msg: u32,
@@ -272,44 +312,53 @@ mod windows {
     ) -> LRESULT {
         match msg {
             WM_CREATE => {
-                let data = lparam.0 as *mut CREATESTRUCTW;
-                let data = (*data).lpCreateParams as *mut UndecoratedResizingData;
-                (*data).child = child;
-                SetWindowLongPtrW(child, GWLP_USERDATA, data as _);
+                let create_struct = lparam.0 as *const CREATESTRUCTW;
+
+                // SAFETY: Win32 provides a valid `CREATESTRUCTW` pointer for
+                // `WM_CREATE`, and `lpCreateParams` contains the box allocated
+                // before `CreateWindowExW`.
+                let data =
+                    unsafe { (*create_struct).lpCreateParams as *mut UndecoratedResizingData };
+
+                // SAFETY: `data` points to the live allocation transferred to
+                // this window during creation. Mutating the stored child handle
+                // does not move the value out of the allocation.
+                unsafe {
+                    (*data).child = child;
+                    SetWindowLongPtrW(child, GWLP_USERDATA, data as _);
+                }
             }
 
             WM_NCHITTEST => {
-                let data = GetWindowLongPtrW(child, GWLP_USERDATA);
-                let data = &*(data as *mut UndecoratedResizingData);
+                let data = unsafe { GetWindowLongPtrW(child, GWLP_USERDATA) };
+                let data = unsafe { &*(data as *mut UndecoratedResizingData) };
 
-                let Ok(parent) = GetParent(child) else {
-                    return DefWindowProcW(child, msg, wparam, lparam);
+                let Ok(parent) = (unsafe { GetParent(child) }) else {
+                    return unsafe { DefWindowProcW(child, msg, wparam, lparam) };
                 };
-                let style = GetWindowLongPtrW(parent, GWL_STYLE);
+                let style = unsafe { GetWindowLongPtrW(parent, GWL_STYLE) };
                 let style = WINDOW_STYLE(style as u32);
 
                 let is_resizable = (style & WS_SIZEBOX).0 != 0;
                 if !is_resizable {
-                    return DefWindowProcW(child, msg, wparam, lparam);
+                    return unsafe { DefWindowProcW(child, msg, wparam, lparam) };
                 }
 
-                // if the window has undecorated shadows,
-                // it should always be the top border,
-                // ensured by the cutout drag window
+                // Shadowed undecorated windows expose only the top resize edge.
                 if data.has_undecorated_shadows {
                     return LRESULT(HTTOP as _);
                 }
 
                 let mut rect = RECT::default();
-                if GetWindowRect(child, &mut rect).is_err() {
-                    return DefWindowProcW(child, msg, wparam, lparam);
+                if unsafe { GetWindowRect(child, &mut rect).is_err() } {
+                    return unsafe { DefWindowProcW(child, msg, wparam, lparam) };
                 }
 
                 let (cx, cy) = (GET_X_LPARAM(lparam) as i32, GET_Y_LPARAM(lparam) as i32);
 
-                let dpi = unsafe { util::hwnd_dpi(child) };
-                let border_x = util::get_system_metrics_for_dpi(SM_CXFRAME, dpi);
-                let border_y = util::get_system_metrics_for_dpi(SM_CYFRAME, dpi);
+                let dpi = unsafe { utils::hwnd_dpi(child) };
+                let border_x = unsafe { utils::get_system_metrics_for_dpi(SM_CXFRAME, dpi) };
+                let border_y = unsafe { utils::get_system_metrics_for_dpi(SM_CYFRAME, dpi) };
 
                 let res = hit_test(
                     rect.left,
@@ -326,36 +375,34 @@ mod windows {
             }
 
             WM_NCLBUTTONDOWN => {
-                let data = GetWindowLongPtrW(child, GWLP_USERDATA);
-                let data = &*(data as *mut UndecoratedResizingData);
+                let data = unsafe { GetWindowLongPtrW(child, GWLP_USERDATA) };
+                let data = unsafe { &*(data as *mut UndecoratedResizingData) };
 
-                let Ok(parent) = GetParent(child) else {
-                    return DefWindowProcW(child, msg, wparam, lparam);
+                let Ok(parent) = (unsafe { GetParent(child) }) else {
+                    return unsafe { DefWindowProcW(child, msg, wparam, lparam) };
                 };
-                let style = GetWindowLongPtrW(parent, GWL_STYLE);
+                let style = unsafe { GetWindowLongPtrW(parent, GWL_STYLE) };
                 let style = WINDOW_STYLE(style as u32);
 
                 let is_resizable = (style & WS_SIZEBOX).0 != 0;
                 if !is_resizable {
-                    return DefWindowProcW(child, msg, wparam, lparam);
+                    return unsafe { DefWindowProcW(child, msg, wparam, lparam) };
                 }
 
                 let (cx, cy) = (GET_X_LPARAM(lparam) as i32, GET_Y_LPARAM(lparam) as i32);
 
-                // if the window has undecorated shadows,
-                // it should always be the top border,
-                // ensured by the cutout drag window
+                // Shadowed undecorated windows expose only the top resize edge.
                 let res = if data.has_undecorated_shadows {
                     HitTestResult::Top
                 } else {
                     let mut rect = RECT::default();
-                    if GetWindowRect(child, &mut rect).is_err() {
-                        return DefWindowProcW(child, msg, wparam, lparam);
+                    if unsafe { GetWindowRect(child, &mut rect).is_err() } {
+                        return unsafe { DefWindowProcW(child, msg, wparam, lparam) };
                     }
 
-                    let dpi = unsafe { util::hwnd_dpi(child) };
-                    let border_x = util::get_system_metrics_for_dpi(SM_CXFRAME, dpi);
-                    let border_y = util::get_system_metrics_for_dpi(SM_CYFRAME, dpi);
+                    let dpi = unsafe { utils::hwnd_dpi(child) };
+                    let border_x = unsafe { utils::get_system_metrics_for_dpi(SM_CXFRAME, dpi) };
+                    let border_y = unsafe { utils::get_system_metrics_for_dpi(SM_CYFRAME, dpi) };
 
                     hit_test(
                         rect.left,
@@ -375,80 +422,97 @@ mod windows {
                         y: cy as i16,
                     };
 
-                    let _ = PostMessageW(
-                        Some(parent),
-                        WM_NCLBUTTONDOWN,
-                        WPARAM(res.to_win32() as _),
-                        LPARAM(&points as *const _ as _),
-                    );
+                    let _ = unsafe {
+                        PostMessageW(
+                            Some(parent),
+                            WM_NCLBUTTONDOWN,
+                            WPARAM(res.to_win32() as _),
+                            LPARAM(&points as *const _ as _),
+                        )
+                    };
                 }
 
                 return LRESULT(0);
             }
 
             WM_UPDATE_UNDECORATED_SHADOWS => {
-                let data = GetWindowLongPtrW(child, GWLP_USERDATA);
-                let data = &mut *(data as *mut UndecoratedResizingData);
+                let data = unsafe { GetWindowLongPtrW(child, GWLP_USERDATA) };
+                let data = unsafe { &mut *(data as *mut UndecoratedResizingData) };
                 data.has_undecorated_shadows = wparam.0 != 0;
             }
 
             WM_NCDESTROY => {
-                let data = GetWindowLongPtrW(child, GWLP_USERDATA);
+                let data = unsafe { GetWindowLongPtrW(child, GWLP_USERDATA) };
                 let data = data as *mut UndecoratedResizingData;
-                drop(Box::from_raw(data));
+                drop(unsafe { Box::from_raw(data) });
             }
 
             _ => {}
         }
 
-        DefWindowProcW(child, msg, wparam, lparam)
+        unsafe { DefWindowProcW(child, msg, wparam, lparam) }
     }
 
+    /// Detaches the native resize handler from a window.
     pub fn detach_resize_handler(hwnd: isize) {
         let hwnd = HWND(hwnd as _);
 
+        // SAFETY: `hwnd` is expected to reference the parent window. The class
+        // and window names are valid static strings.
+        // SAFETY: The class and window names are valid static strings.
         let Ok(child) = (unsafe { FindWindowExW(Some(hwnd), None, CLASS_NAME, WINDOW_NAME) })
         else {
             return;
         };
 
+        // SAFETY: `child` was returned by `FindWindowExW` and belongs to this
+        // resize handler. Destruction triggers the normal Win32 cleanup path.
         let _ = unsafe { DestroyWindow(child) };
     }
 
+    /// Applies the interactive resize region to the transparent child window.
+    ///
+    /// # Safety
+    ///
+    /// `hwnd` must reference a live window owned by the current thread. The
+    /// supplied dimensions must describe its current client area.
     unsafe fn set_drag_hwnd_rgn(hwnd: HWND, width: i32, height: i32, only_top: bool) {
         // The window used for drag resizing an undecorated window
         // is a child HWND that covers the whole window
         // and so we need create a cut out in the middle for the parent and other child
         // windows like the webview can receive mouse events.
 
-        let dpi = unsafe { util::hwnd_dpi(hwnd) };
-        let border_x = util::get_system_metrics_for_dpi(SM_CXFRAME, dpi);
-        let border_y = util::get_system_metrics_for_dpi(SM_CYFRAME, dpi);
+        let dpi = unsafe { utils::hwnd_dpi(hwnd) };
+        let border_x = unsafe { utils::get_system_metrics_for_dpi(SM_CXFRAME, dpi) };
+        let border_y = unsafe { utils::get_system_metrics_for_dpi(SM_CYFRAME, dpi) };
 
-        // hrgn1 must be mutable to call .free() later
-        let mut hrgn1 = CreateRectRgn(0, 0, width, height);
+        // Keep ownership explicit because `SetWindowRgn` conditionally takes it.
+        let mut hrgn1 = unsafe { CreateRectRgn(0, 0, width, height) };
 
         let x1 = if only_top { 0 } else { border_x };
         let y1 = border_y;
         let x2 = if only_top { width } else { width - border_x };
         let y2 = if only_top { height } else { height - border_y };
 
-        // Wrap hrgn2 in Owned so it is automatically freed when going out of scope
-        let hrgn2 = Owned::new(CreateRectRgn(x1, y1, x2, y2));
+        // The inner cutout remains locally owned and is released automatically.
+        let hrgn2 = unsafe { Owned::new(CreateRectRgn(x1, y1, x2, y2)) };
 
-        CombineRgn(Some(hrgn1), Some(hrgn1), Some(*hrgn2), RGN_DIFF);
+        unsafe { CombineRgn(Some(hrgn1), Some(hrgn1), Some(*hrgn2), RGN_DIFF) };
 
-        // Try to set the window region
-        if SetWindowRgn(hwnd, Some(hrgn1), true) == 0 {
-            // If it fails, we must free hrgn1 manually
-            hrgn1.free();
+        // On success, Win32 owns `hrgn1`; otherwise it remains ours to release.
+        if unsafe { SetWindowRgn(hwnd, Some(hrgn1), true) } == 0 {
+            // Ownership was not transferred.
+            unsafe { hrgn1.free() };
         }
     }
 
+    /// Updates the resize region after the undecorated-shadow state changes.
     pub fn update_drag_hwnd_rgn_for_undecorated(hwnd: isize, has_undecorated_shadows: bool) {
         let hwnd = HWND(hwnd as _);
 
         let mut rect = RECT::default();
+        // SAFETY: `rect` is valid writable storage and `hwnd` is expected to
+        // reference a live parent window.
         let Ok(_) = (unsafe { GetClientRect(hwnd, &mut rect) }) else {
             return;
         };
@@ -461,6 +525,8 @@ mod windows {
             return;
         };
 
+        // SAFETY: `child` is the live resize window found above and the
+        // dimensions were read from its parent client area.
         unsafe { set_drag_hwnd_rgn(child, width, height, has_undecorated_shadows) };
 
         unsafe {
@@ -481,11 +547,14 @@ mod windows {
         };
     }
 
+    /// Returns whether the native window is maximized.
     fn is_maximized(window: HWND) -> windows::core::Result<bool> {
         let mut placement = WINDOWPLACEMENT {
             length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
             ..WINDOWPLACEMENT::default()
         };
+        // SAFETY: `placement` has the required size initialized and remains
+        // valid writable storage for the duration of the call.
         unsafe { GetWindowPlacement(window, &mut placement)? };
         Ok(placement.showCmd == SW_MAXIMIZE.0 as u32)
     }
@@ -573,6 +642,7 @@ mod gtk {
         hit_test_window(window, root_x - window_x as f64, root_y - window_y as f64)
     }
 
+    /// Attaches GTK resize handling to an undecorated webview window.
     pub fn attach_resize_handler(webview: &wry::WebView) {
         use gtk::{gdk::WindowEdge, glib::Propagation};
         use wry::WebViewExtUnix;
@@ -620,7 +690,7 @@ mod gtk {
                 }
 
                 window.begin_resize_drag(edge, 1, root_x as i32, root_y as i32, event.time());
-                // Prevent the webview from handling an event claimed by the resize inset
+                // Consume pointer input claimed by the resize inset.
                 Propagation::Stop
             },
         );

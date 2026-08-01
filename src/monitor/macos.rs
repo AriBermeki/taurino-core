@@ -6,12 +6,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::{
-    MonitorExt,
-    dpi::{LogicalSize, PhysicalRect},
-};
-
-impl MonitorExt for tao::monitor::MonitorHandle {
+use crate::types::{LogicalSize, PhysicalRect};
+impl super::MonitorExt for tao::monitor::MonitorHandle {
     fn work_area(&self) -> PhysicalRect<i32, u32> {
         use objc2_app_kit::NSScreen;
         use tao::platform::macos::MonitorHandleExtMacOS;

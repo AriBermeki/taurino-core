@@ -5,7 +5,6 @@
 // within The Commons Conservancy
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-
 use gtk::prelude::*;
 #[cfg(any(
     target_os = "linux",

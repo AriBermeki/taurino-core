@@ -6,198 +6,33 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
-
 pub use http::{
     header::{InvalidHeaderName, InvalidHeaderValue},
     method::InvalidMethod,
     status::InvalidStatusCode,
 };
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-mod monitor_linux;
-#[cfg(target_os = "macos")]
-mod monitor_macos;
+use tao::error::OsError;
+pub use tao;
+pub use wry;
 #[cfg(windows)]
-mod monitor_windows;
+pub use webview2_com;
+#[cfg(windows)]
+pub use windows;
+#[cfg(target_os = "linux")]
+pub use gtk;
+#[cfg(target_vendor = "apple")]
+pub use objc2_app_kit; 
+pub mod build;
+pub mod dialog;
+pub mod event;
+pub mod monitor;
+pub mod types;
 pub mod undecorated_resizing;
-pub mod util;
-
-#[cfg(target_os = "linux")]
-mod window_linux;
-#[cfg(target_os = "macos")]
-mod window_macos;
-#[cfg(windows)]
-mod window_windows;
-
-#[cfg(target_os = "linux")]
-mod dialog_linux;
-#[cfg(target_os = "macos")]
-mod dialog_macos;
-#[cfg(windows)]
-mod dialog_windows;
-mod window_builder;
-
-pub use window_builder::{
-    DragDropEvent, FrameBuilder, TaoIcon, WindowEvent, WindowEventHandler, WindowEventListener,
-};
-
-pub mod dpi;
-pub mod starting_binary;
-
-pub mod dialog {
-
-    #[cfg(target_os = "linux")]
-    use super::dialog_linux::error;
-    #[cfg(target_os = "macos")]
-    use super::dialog_macos::error;
-    #[cfg(windows)]
-    use super::dialog_windows::error;
-}
-pub mod monitor {
-    #[cfg(target_os = "linux")]
-    use super::monitor_linux;
-    #[cfg(target_os = "macos")]
-    use super::monitor_macos;
-    #[cfg(windows)]
-    use super::monitor_windows;
-
-    pub trait MonitorExt {
-        /// Get the work area of this monitor
-        ///
-        /// ## Platform-specific:
-        ///
-        /// - **Android / iOS**: Unsupported.
-        fn work_area(&self) -> crate::dpi::PhysicalRect<i32, u32>;
-    }
-
-    #[cfg(mobile)]
-    impl MonitorExt for tao::monitor::MonitorHandle {
-        fn work_area(&self) -> PhysicalRect<i32, u32> {
-            PhysicalRect {
-                size: self.size(),
-                position: self.position(),
-            }
-        }
-    }
-}
-
-pub mod window {
-    #[cfg(target_os = "linux")]
-    use super::window_linux;
-    #[cfg(target_os = "macos")]
-    use super::window_macos;
-    #[cfg(windows)]
-    use super::window_windows;
-    use crate::monitor::MonitorExt;
-    pub use tao;
-    #[cfg(windows)]
-    pub use windows;
-    pub trait WindowExt {
-        /// Enable or disable the window
-        ///
-        /// ## Platform-specific:
-        ///
-        /// - **Android / iOS**: Unsupported.
-        fn set_enabled(&self, enabled: bool);
-
-        /// Whether the window is enabled or disabled.
-        ///
-        /// ## Platform-specific:
-        ///
-        /// - **Android / iOS**: Unsupported, always returns `true`.
-        fn is_enabled(&self) -> bool;
-
-        /// Center the window
-        ///
-        /// ## Platform-specific:
-        ///
-        /// - **Android / iOS**: Unsupported.
-        fn center(&self) {}
-
-        /// Clears the window surface. i.e make it transparent.
-        #[cfg(windows)]
-        fn draw_surface(
-            &self,
-            surface: &mut softbuffer::Surface<
-                std::sync::Arc<tao::window::Window>,
-                std::sync::Arc<tao::window::Window>,
-            >,
-            background_color: Option<tao::window::RGBA>,
-        );
-    }
-
-    #[cfg(mobile)]
-    impl WindowExt for tao::window::Window {
-        fn set_enabled(&self, _: bool) {}
-        fn is_enabled(&self) -> bool {
-            true
-        }
-    }
-
-    #[cfg(desktop)]
-    pub fn calculate_window_center_position(
-        window_size: tao::dpi::PhysicalSize<u32>,
-        target_monitor: tao::monitor::MonitorHandle,
-    ) -> tao::dpi::PhysicalPosition<i32> {
-        let work_area = target_monitor.work_area();
-
-        tao::dpi::PhysicalPosition::new(
-            (work_area.size.width as i32 - window_size.width as i32) / 2 + work_area.position.x,
-            (work_area.size.height as i32 - window_size.height as i32) / 2 + work_area.position.y,
-        )
-    }
-}
-
-pub mod webview {
-    #[cfg(windows)]
-    pub use webview2_com;
-    pub use wry;
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    ))]
-    mod imp {
-        pub type Webview = webkit2gtk::WebView;
-    }
-
-    #[cfg(target_vendor = "apple")]
-    mod imp {
-        use std::ffi::c_void;
-
-        pub struct Webview {
-            pub webview: *mut c_void,
-            pub manager: *mut c_void,
-            #[cfg(target_os = "macos")]
-            pub ns_window: *mut c_void,
-            #[cfg(target_os = "ios")]
-            pub view_controller: *mut c_void,
-        }
-    }
-
-    #[cfg(windows)]
-    mod imp {
-        use webview2_com::Microsoft::Web::WebView2::Win32::{
-            ICoreWebView2Controller, ICoreWebView2Environment,
-        };
-        pub struct Webview {
-            pub controller: ICoreWebView2Controller,
-            pub environment: ICoreWebView2Environment,
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    mod imp {
-        use wry::JniHandle;
-        pub type Webview = JniHandle;
-    }
-
-    pub use imp::*;
-}
-
+pub mod utils;
+pub mod web;
+pub mod window;
+pub mod wrapper;
 /// The result type of `tauri-utils`.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -205,6 +40,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Failed to create the webview.
+    #[error("failed to create webview: {0}")]
+    CreateWebview(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Failed to create the window.
+    #[error("failed to create window: {0}")]
+    CreateWindow(#[from] OsError),
     /// Target triple architecture error
     #[error("Unable to determine target-architecture")]
     Architecture,
@@ -258,10 +100,6 @@ pub enum Error {
          expected `ico` or `png`"
     )]
     InvalidImageExtension { extension: PathBuf, path: PathBuf },
-
-    /// Failed to create the webview.
-    #[error("failed to create webview: {0}")]
-    CreateWebview(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Failed to serialize or deserialize JSON data.
     #[error("failed to process JSON data: {0}")]
@@ -340,3 +178,5 @@ pub enum Error {
     #[error("external platform error: {0}")]
     ExternalError(tao::error::ExternalError),
 }
+
+fn main() {}

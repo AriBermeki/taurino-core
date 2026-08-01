@@ -6,11 +6,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use crate::types::PhysicalRect;
 use tao::dpi::{PhysicalPosition, PhysicalSize};
 
-use crate::{dpi::PhysicalRect, monitor::MonitorExt};
-
-impl MonitorExt for tao::monitor::MonitorHandle {
+impl super::MonitorExt for tao::monitor::MonitorHandle {
     fn work_area(&self) -> PhysicalRect<i32, u32> {
         use tao::platform::windows::MonitorHandleExtWindows;
         use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};

@@ -5,6 +5,7 @@
 // within The Commons Conservancy
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
+
 use windows::Win32::{
     Foundation::{HWND, RECT},
     Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
@@ -13,7 +14,7 @@ use windows::Win32::{
 
 use tao::platform::windows::WindowExtWindows;
 
-impl crate::window::WindowExt for tao::window::Window {
+impl super::WindowExt for tao::window::Window {
     fn set_enabled(&self, enabled: bool) {
         let _ = unsafe { EnableWindow(HWND(self.hwnd() as _), enabled) };
     }
@@ -41,7 +42,7 @@ impl crate::window::WindowExt for tao::window::Window {
                 }
             }
 
-            let new_pos = crate::window::calculate_window_center_position(window_size, monitor);
+            let new_pos = super::calculate_window_center_position(window_size, monitor);
             self.set_outer_position(new_pos);
         }
     }
